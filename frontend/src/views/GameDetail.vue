@@ -4,8 +4,9 @@
     <div class="blur-bg" v-if="game.cover_image" :style="{ backgroundImage: `url(${game.cover_image})` }"></div>
     <div class="blur-overlay"></div>
 
-    <!-- Content -->
+    <!-- Back button -->
     <div class="detail-content">
+      <router-link to="/" class="back-btn">← 返回首页</router-link>
       <!-- Hero -->
       <div class="detail-hero">
         <img v-if="game.cover_image" :src="game.cover_image" :alt="game.title" class="detail-cover" />
@@ -82,6 +83,16 @@ onMounted(() => {
   background: rgba(13, 17, 23, 0.6);
   z-index: -1;
 }
+.back-btn {
+  display: inline-block;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.9rem;
+  margin-bottom: 16px;
+  transition: color 0.2s;
+}
+.back-btn:hover { color: var(--text-primary); }
+
 .detail-content {
   position: relative;
   max-width: 1100px;
@@ -185,5 +196,15 @@ onMounted(() => {
   justify-content: center;
   min-height: 60vh;
   color: #8b949e;
+}
+
+@media (max-width: 768px) {
+  .detail-hero { flex-direction: column; align-items: center; text-align: center; }
+  .detail-cover { width: 160px; height: 224px; }
+  .detail-title { font-size: 1.5rem; }
+  .detail-body { flex-direction: column; }
+  .detail-sidebar { width: 100%; }
+  .detail-meta { justify-content: center; flex-wrap: wrap; }
+  .detail-tags { justify-content: center; }
 }
 </style>

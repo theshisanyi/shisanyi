@@ -41,4 +41,9 @@ onMounted(() => {
   padding: 40px;
   font-size: 1rem;
 }
+
+@media (max-width: 768px) {
+  .home-page { padding: 16px 12px; }
+  .game-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+}
 </style>
