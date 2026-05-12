@@ -91,12 +91,13 @@ class Command(BaseCommand):
 
         # Parse release date
         release_info = data.get('release_date', {})
-        release_date = release_info.get('date', '')
-        if release_date:
+        raw_date = release_info.get('date', '')
+        release_date = None
+        if raw_date:
             try:
-                for fmt in ('%d %b, %Y', '%Y年%m月%d日', '%b %d, %Y', '%Y-%m-%d'):
+                for fmt in ('%Y 年 %m 月 %d 日', '%Y年%m月%d日', '%d %b, %Y', '%b %d, %Y', '%Y-%m-%d'):
                     try:
-                        release_date = datetime.strptime(release_date, fmt).strftime('%Y-%m-%d')
+                        release_date = datetime.strptime(raw_date, fmt).strftime('%Y-%m-%d')
                         break
                     except ValueError:
                         continue
@@ -206,27 +207,30 @@ class Command(BaseCommand):
             r2 = requests.get(game_url, headers=headers, timeout=15)
             soup2 = BeautifulSoup(r2.content, 'lxml')
 
-            # 4. 提取标签（优先从游戏信息区提取，排除侧边栏攻略链接）
+            # 4. 提取标签（优先从游戏信息区，排除攻略/补丁链接）
             tags = []
-            # 先找游戏信息/属性区域
             info_area = soup2.select_one('.game-info, .game-attr, .info-box, .game-meta, .g-info, .detail-info')
             if info_area:
                 tag_elems = info_area.select('a, span.tag, span.type, .label')
                 for t in tag_elems[:10]:
                     tag_text = t.get_text(strip=True)
-                    if tag_text and len(tag_text) >= 2 and len(tag_text) <= 10:
+                    if tag_text and 2 <= len(tag_text) <= 8:
                         tags.append(tag_text)
 
-            # 如果没有找到信息区，尝试通用标签选择器（排除太长的文本即攻略链接）
+            # Fallback: 通用标签选择器，排除非游戏标签
             if not tags:
-                exclude_words = ['补丁', '修改器', '攻略', '存档', 'MOD', 'mod', '汉化', '下载', '全DLC']
+                exclude_words = ['补丁', '修改器', '攻略', '存档', 'MOD', 'mod', '汉化',
+                                 '下载', '全DLC', '全', '位置', '地图', '装备', '版本']
                 tag_elems = (soup2.select('.tag a, .type a, .info-tag a')
                              or soup2.select('[class*="tag"] a, [class*="type"] a'))
-                for t in tag_elems[:8]:
+                for t in tag_elems[:20]:
                     tag_text = t.get_text(strip=True)
-                    if (tag_text and len(tag_text) >= 2 and len(tag_text) <= 8
-                            and not any(w in tag_text for w in exclude_words)):
+                    if (tag_text and 2 <= len(tag_text) <= 8
+                            and not any(w in tag_text for w in exclude_words)
+                            and not re.match(r'^[\d.]+', tag_text)):
                         tags.append(tag_text)
+                # 去重用
+                tags = list(dict.fromkeys(tags))[:8]
 
             # 5. 提取简介
             intro = ''
@@ -323,19 +327,26 @@ class Command(BaseCommand):
             return
 
         if game:
-            for key in ['official_intro', 'purchase_link', 'release_date']:
+            for key in ['official_intro', 'purchase_link']:
                 if data.get(key):
                     setattr(game, key, data[key])
+            # 日期只保留 YYYY-MM-DD 格式
+            rd = data.get('release_date')
+            if rd and re.match(r'^\d{4}-\d{2}-\d{2}$', str(rd)):
+                game.release_date = rd
             game.rating = data.get('rating', game.rating)
             game.save()
             self.stdout.write(self.style.SUCCESS(f'  已更新: {title}'))
         else:
+            rd = data.get('release_date')
+            if not rd or not re.match(r'^\d{4}-\d{2}-\d{2}$', str(rd)):
+                rd = None
             game = Game.objects.create(
                 title=title,
                 rating=data.get('rating', 0),
                 official_intro=data.get('official_intro', ''),
                 purchase_link=data.get('purchase_link', ''),
-                release_date=data.get('release_date'),
+                release_date=rd,
             )
             self.stdout.write(self.style.SUCCESS(f'  已创建: {title}'))
 
