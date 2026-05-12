@@ -7,6 +7,7 @@ from urllib.parse import quote
 import os
 import re
 from io import BytesIO
+from datetime import datetime
 
 
 class Command(BaseCommand):
@@ -72,8 +73,7 @@ class Command(BaseCommand):
         release_date = release_info.get('date', '')
         if release_date:
             try:
-                from datetime import datetime
-                for fmt in ('%d %m, %Y', '%Y年%m月%d日', '%b %d, %Y', '%Y-%m-%d'):
+                for fmt in ('%d %b, %Y', '%Y年%m月%d日', '%b %d, %Y', '%Y-%m-%d'):
                     try:
                         release_date = datetime.strptime(release_date, fmt).strftime('%Y-%m-%d')
                         break
@@ -171,12 +171,14 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f'  已创建: {title}'))
 
         # Tags
+        categories = []
         for tag_name in data.get('tags', []):
             cat, _ = Category.objects.get_or_create(
                 name=tag_name,
                 defaults={'slug': re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]+', '-', tag_name).strip('-').lower() or tag_name}
             )
-            game.categories.add(cat)
+            categories.append(cat)
+        game.categories.set(categories)
 
         # Download cover image
         cover_url = data.get('cover_image_url')
