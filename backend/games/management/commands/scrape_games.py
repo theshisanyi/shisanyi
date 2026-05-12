@@ -147,16 +147,17 @@ class Command(BaseCommand):
         content_elem = result.select_one('.content p') or result.select_one('.content')
         if content_elem:
             text = content_elem.get_text(' ', strip=True)
-            # Split into potential tag fragments
-            parts = [p.strip() for p in re.split(r'[，,、/\s]+', text) if len(p.strip()) >= 2]
-            # Exclude non-tag patterns
+            # 豆瓣搜索结果通常不含游戏类型标签，只含评价信息
+            # 只有长度<=4且只含中文的可能是标签
+            parts = [p.strip() for p in re.split(r'[，,、/\s]+', text) if 2 <= len(p.strip()) <= 4]
             exclude_patterns = ['人关注', '人评价', '人玩过', '人在玩', '人想玩', '人在做',
-                               '上海', '北京', '深圳', '广州', '杭州', '成都', '豆瓣']
+                               '上海', '北京', '深圳', '广州', '杭州', '成都', '豆瓣', '评分']
             tags = [p for p in parts
                     if not any(ep in p for ep in exclude_patterns)
-                    and not re.match(r'^\d+$', p)
+                    and not re.match(r'^\d+', p)
                     and p != title
-                    and p != name][:6]
+                    and p != name
+                    and re.match(r'^[\u4e00-\u9fff]+$', p)][:4]  # 只取纯中文短词
 
         return {
             'douban_title': title,
@@ -177,27 +178,29 @@ class Command(BaseCommand):
         return self._search_site(name, '3dmgame.com', '3DM')
 
     def _search_site(self, name, domain, label):
-        """通用方法：通过 Bing 搜索指定站点内的游戏页面"""
+        """通过 Bing 搜索指定站点内的游戏页面"""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         try:
-            # 1. 用 Bing 搜索 site:domain 游戏名
+            # 1. Bing 搜索
             query = f'site:{domain} {name}'
             search_url = f'https://www.bing.com/search?q={quote(query)}'
             r = requests.get(search_url, headers=headers, timeout=15)
             soup = BeautifulSoup(r.text, 'lxml')
 
-            # 2. 在搜索结果中找该站点的链接
-            result_links = soup.select('.b_algo h2 a, #b_results h2 a, .b_title a')
+            # 2. 找站点链接
             game_url = None
             game_title = name
-            for a in result_links:
-                href = a.get('href', '')
-                text = a.get_text(strip=True)
-                if domain in href:
-                    game_url = href
-                    game_title = text.split('_')[0] if '_' in text else text
+            for sel in ['.b_algo h2 a', '#b_results h2 a', '.b_title a', 'h2 a[href]']:
+                for a in soup.select(sel):
+                    href = a.get('href', '')
+                    text = a.get_text(strip=True)
+                    if domain in href and 'search' not in href.lower():
+                        game_url = href
+                        game_title = text.split('_')[0].strip() if '_' in text else text
+                        break
+                if game_url:
                     break
 
             if not game_url:
@@ -207,68 +210,113 @@ class Command(BaseCommand):
             r2 = requests.get(game_url, headers=headers, timeout=15)
             soup2 = BeautifulSoup(r2.content, 'lxml')
 
-            # 4. 提取标签（优先从游戏信息区，排除攻略/补丁链接）
-            tags = []
-            info_area = soup2.select_one('.game-info, .game-attr, .info-box, .game-meta, .g-info, .detail-info')
-            if info_area:
-                tag_elems = info_area.select('a, span.tag, span.type, .label')
-                for t in tag_elems[:10]:
-                    tag_text = t.get_text(strip=True)
-                    if tag_text and 2 <= len(tag_text) <= 8:
-                        tags.append(tag_text)
+            # ---- 封面图 (优先 OG 标签, 其次页面第一张大图) ----
+            cover_url = ''
+            og_img = soup2.select_one('meta[property="og:image"]')
+            if og_img:
+                cover_url = og_img.get('content', '')
 
-            # Fallback: 通用标签选择器，排除非游戏标签
-            if not tags:
-                exclude_words = ['补丁', '修改器', '攻略', '存档', 'MOD', 'mod', '汉化',
-                                 '下载', '全DLC', '全', '位置', '地图', '装备', '版本']
-                tag_elems = (soup2.select('.tag a, .type a, .info-tag a')
-                             or soup2.select('[class*="tag"] a, [class*="type"] a'))
-                for t in tag_elems[:20]:
-                    tag_text = t.get_text(strip=True)
-                    if (tag_text and 2 <= len(tag_text) <= 8
-                            and not any(w in tag_text for w in exclude_words)
-                            and not re.match(r'^[\d.]+', tag_text)):
-                        tags.append(tag_text)
-                # 去重用
-                tags = list(dict.fromkeys(tags))[:8]
+            if not cover_url:
+                # 找页面主图（多种选择器）
+                for sel in ['.game-cover img', '.detail-cover img', '.game-img img',
+                            '.pic-show img', '.pic img', '[class*="cover"] img',
+                            '.banner img', 'img.banner', '[class*="banner"] img']:
+                    img = soup2.select_one(sel)
+                    if img:
+                        src = img.get('src') or img.get('data-src') or ''
+                        if src and len(src) > 15:
+                            cover_url = src
+                            break
 
-            # 5. 提取简介
+            if not cover_url:
+                # 取文件名含 banner/cover/thumb 的图片（排除 logo/head）
+                for img in soup2.select('img[src]')[:30]:
+                    src = img.get('src', '')
+                    if src and ('banner' in src or 'cover' in src or 'thumb' in src):
+                        if 'logo' not in src.lower() and 'head' not in src.lower():
+                            cover_url = src
+                            break
+
+            if not cover_url:
+                # 取第一张 .jpg/.png 但排除 logo/icon/head
+                for img in soup2.select('img[src]')[:30]:
+                    src = img.get('src', '')
+                    ext = src.rsplit('.', 1)[-1].lower() if '.' in src else ''
+                    low = src.lower()
+                    if (src and ext in ('jpg', 'jpeg', 'png', 'webp')
+                            and 'icon' not in low and 'logo' not in low and 'head' not in low
+                            and 'qr' not in low):
+                        cover_url = src
+                        break
+
+            if cover_url and cover_url.startswith('//'):
+                cover_url = 'https:' + cover_url
+            elif cover_url and cover_url.startswith('/'):
+                base = re.match(r'(https?://[^/]+)', game_url)
+                if base:
+                    cover_url = base.group(1) + cover_url
+
+            # ---- 简介 ----
             intro = ''
-            intro_elem = (
-                soup2.select_one('.game-desc, .game-intro, .game-des, .intro, .g-intro')
-                or soup2.select_one('[class*="desc"], [class*="intro"], [class*="summary"]')
-            )
-            if intro_elem:
-                intro = intro_elem.get_text(strip=True)[:500]
+            for tag in soup2.find_all(['div', 'section', 'p', 'article']):
+                text = tag.get_text(strip=True)
+                if ('简介' in text or '介绍' in text or '描述' in text) and 20 < len(text) < 2000:
+                    for marker in ['游戏简介', '游戏介绍', '剧情简介', '游戏描述', '简介', '介绍']:
+                        if marker in text:
+                            idx = text.index(marker) + len(marker)
+                            intro = text[idx:].strip('：:： ')[:500]
+                            break
+                    if intro:
+                        break
+                    intro = text[:500]
+                    break
 
-            # 6. 提取发布日期
+            if not intro:
+                # Meta description 作为后备
+                meta_desc = soup2.select_one('meta[name="description"]')
+                if meta_desc:
+                    intro_text = meta_desc.get('content', '')
+                    if intro_text and len(intro_text) > 20:
+                        intro = intro_text[:500]
+
+            if not intro:
+                # 最后尝试找页面上任何有意义的文本
+                for tag in soup2.find_all(['p', 'div']):
+                    text = tag.get_text(strip=True)
+                    if 50 < len(text) < 500 and '。' in text:
+                        intro = text[:500]
+                        break
+
+            # ---- 标签 ----
+            tags = []
+            exclude_words = ['补丁', '修改器', '攻略', '存档', 'MOD', 'mod', '汉化',
+                             '下载', '全DLC', '全', '位置', '地图', '装备', '版本', '新闻',
+                             '骑士', '战士', '盗贼', '预言', '剑士', '法师', '无用', '无用之人',
+                             '武士', '密使', '观星者', '囚犯', '勇者', '英雄', '恶兆',
+                             '职业', '流派', '加点', '全流程', '收集', '成就']
+            # 找游戏信息区域
+            info_area = soup2.select_one('.game-info, .game-attr, .info-box, .game-meta, .g-info, .detail-info')
+            source_elems = info_area.select('a, span.tag, span.type, .label') if info_area else []
+            if not source_elems:
+                source_elems = (soup2.select('.tag a, .type a, .info-tag a')
+                                or soup2.select('[class*="tag"] a, [class*="type"] a'))
+
+            for t in source_elems[:20]:
+                tag_text = t.get_text(strip=True)
+                if (tag_text and 2 <= len(tag_text) <= 6
+                        and not any(w in tag_text for w in exclude_words)
+                        and re.match(r'^[\u4e00-\u9fff\w]+$', tag_text)):
+                    tags.append(tag_text)
+            tags = list(dict.fromkeys(tags))[:6]
+
+            # ---- 发售日期 ----
             release_date = None
-            date_elems = soup2.select('[class*="date"], [class*="time"], .game-date, .release')
-            for de in date_elems:
+            for de in soup2.select('[class*="date"], [class*="time"], .game-date, .release'):
                 date_text = de.get_text(strip=True)
-                match = re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})', date_text)
+                match = re.search(r'(\d{4}).*?(\d{1,2}).*?(\d{1,2})', date_text)
                 if match:
                     release_date = f'{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}'
                     break
-
-            # 7. 提取封面图
-            cover_url = ''
-            cover_img = (
-                soup2.select_one('.game-cover img, .game-img img, .detail-img img, .pic img')
-                or soup2.select_one('[class*="cover"] img, [class*="thumb"] img, [class*="pic"] img')
-                or soup2.select_one('img[src*="cover"], img[src*="thumb"], img[src*="game"]')
-            )
-            if cover_img:
-                src = cover_img.get('src') or cover_img.get('data-src') or ''
-                if src:
-                    if src.startswith('//'):
-                        src = 'https:' + src
-                    elif src.startswith('/'):
-                        # Resolve relative to domain
-                        base = re.match(r'(https?://[^/]+)', game_url)
-                        if base:
-                            src = base.group(1) + src
-                    cover_url = src
 
             return {
                 'title': game_title,
@@ -296,13 +344,18 @@ class Command(BaseCommand):
             doyo.get('tags', []) +
             threedm.get('tags', [])
         ))
-        # 简介：豆瓣优先，Steam 补充，游侠补充
+        # 简介：豆瓣优先，Steam/游侠/逗游/3DM 补充
         intro = (douban.get('douban_intro', '')
                  or steam.get('official_intro', '')
-                 or youxia.get('intro', ''))
+                 or youxia.get('intro', '')
+                 or doyo.get('intro', '')
+                 or threedm.get('intro', ''))
 
-        # 封面：Steam 优先，游侠补充
-        cover = steam.get('cover_image_url', '') or youxia.get('cover_image_url', '')
+        # 封面：Steam 优先，游侠/逗游/3DM 补充
+        cover = (steam.get('cover_image_url', '')
+                 or youxia.get('cover_image_url', '')
+                 or doyo.get('cover_image_url', '')
+                 or threedm.get('cover_image_url', ''))
 
         # 购买链接
         purchase = steam.get('purchase_link', '') or youxia.get('purchase_link', '')
@@ -362,15 +415,21 @@ class Command(BaseCommand):
 
         # Download cover image
         cover_url = data.get('cover_image_url')
-        if cover_url and not game.cover_image:
+        if cover_url and (not game.cover_image or update):
             try:
-                resp = requests.get(cover_url, timeout=20)
+                self.stdout.write(f'  下载封面: {cover_url[:80]}...')
+                img_headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.ali213.net/'}
+                resp = requests.get(cover_url, headers=img_headers, timeout=30)
                 if resp.status_code == 200:
                     ext = cover_url.split('.')[-1].split('?')[0] or 'jpg'
+                    if ext not in ('jpg', 'jpeg', 'png', 'webp'):
+                        ext = 'jpg'
                     safe_title = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]+', '_', title)
                     filename = f"{game.id}_{safe_title}.{ext}"
                     game.cover_image.save(filename, ContentFile(resp.content), save=True)
                     self.stdout.write(f'  封面已下载')
+                else:
+                    self.stdout.write(self.style.WARNING(f'  封面下载失败: HTTP {resp.status_code}'))
             except Exception as e:
                 self.stdout.write(self.style.WARNING(f'  封面下载失败: {e}'))
 
