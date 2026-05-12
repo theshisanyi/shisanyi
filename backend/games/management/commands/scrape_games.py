@@ -280,12 +280,30 @@ class Command(BaseCommand):
                         intro = intro_text[:500]
 
             if not intro:
-                # 最后尝试找页面上任何有意义的文本
+                # 最后尝试找正文段落（排除物品列表、链接文字等）
                 for tag in soup2.find_all(['p', 'div']):
                     text = tag.get_text(strip=True)
-                    if 50 < len(text) < 500 and '。' in text:
+                    # 排除：物品列表（含"效果"+"查看详情"）、导航、太短
+                    if (50 < len(text) < 800 and '。' in text
+                            and not ('效果' in text and '查看详情' in text)
+                            and not ('点击查看' in text)
+                            and not text.startswith('【')):
                         intro = text[:500]
                         break
+
+            # 校验：如果简介看起来像物品列表，丢弃
+            if intro:
+                # 包含"查看详情"的肯定不是游戏介绍
+                if '查看详情' in intro or '点击查看' in intro:
+                    intro = ''
+                # 多个"说明"/"效果"且句号少 = 物品列表
+                item_keywords = intro.count('效果') + intro.count('说明') + intro.count('查看详情')
+                period_count = intro.count('。') + intro.count('.')
+                if item_keywords > 3 and period_count < 3:
+                    intro = ''
+                # 纯链接/优惠券文字
+                if len(intro) > 0 and intro.count('http') > 4:
+                    intro = ''
 
             # ---- 标签 ----
             tags = []
