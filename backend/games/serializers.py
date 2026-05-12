@@ -19,7 +19,9 @@ class GameDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Game
-        fields = '__all__'
+        fields = ['id', 'title', 'cover_image', 'categories', 'rating', 'play_duration',
+                  'release_date', 'official_intro', 'review', 'purchase_link', 'is_hot',
+                  'sort_weight', 'created_at', 'updated_at', 'similar_games']
 
     def get_similar_games(self, obj):
         qs = obj.similar_games.select_related('similar_game').all()
