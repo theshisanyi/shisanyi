@@ -11,7 +11,7 @@ from datetime import datetime
 
 
 class Command(BaseCommand):
-    help = '从 Steam 和豆瓣爬取游戏信息并入库'
+    help = '从 Steam、豆瓣、游侠、逗游、3DM 爬取游戏信息并入库'
 
     def add_arguments(self, parser):
         parser.add_argument('game_names', nargs='+', type=str, help='要爬取的游戏名称（多个）')
@@ -35,7 +35,28 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING(f'  豆瓣爬取失败: {e}'))
                 douban_data = {}
 
-            merged = self.merge_data(name, steam_data, douban_data)
+            try:
+                youxia_data = self.scrape_youxia(name)
+                self.stdout.write(f'  游侠: {"获取到数据" if youxia_data else "未找到"}')
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f'  游侠爬取失败: {e}'))
+                youxia_data = {}
+
+            try:
+                doyo_data = self.scrape_doyo(name)
+                self.stdout.write(f'  逗游: {"获取到数据" if doyo_data else "未找到"}')
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f'  逗游爬取失败: {e}'))
+                doyo_data = {}
+
+            try:
+                threedm_data = self.scrape_3dm(name)
+                self.stdout.write(f'  3DM: {"获取到数据" if threedm_data else "未找到"}')
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f'  3DM爬取失败: {e}'))
+                threedm_data = {}
+
+            merged = self.merge_data(name, steam_data, douban_data, youxia_data, doyo_data, threedm_data)
 
             self.stdout.write(f'  标题: {merged.get("title", "N/A")}')
             self.stdout.write(f'  标签: {", ".join(merged.get("tags", []))}')
@@ -142,21 +163,153 @@ class Command(BaseCommand):
             'tags': tags,
         }
 
-    def merge_data(self, search_name, steam, douban):
-        """合并 Steam 和豆瓣数据，豆瓣中文信息优先"""
-        title = douban.get('douban_title') or steam.get('title', search_name)
+    def scrape_youxia(self, name):
+        """从游侠网 (ali213.net) 搜索游戏信息（通过Bing）"""
+        return self._search_site(name, 'ali213.net', '游侠')
+
+    def scrape_doyo(self, name):
+        """从逗游 (doyo.cn) 搜索游戏信息（通过Bing）"""
+        return self._search_site(name, 'doyo.cn', '逗游')
+
+    def scrape_3dm(self, name):
+        """从3DM (3dmgame.com) 搜索游戏信息（通过Bing）"""
+        return self._search_site(name, '3dmgame.com', '3DM')
+
+    def _search_site(self, name, domain, label):
+        """通用方法：通过 Bing 搜索指定站点内的游戏页面"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        try:
+            # 1. 用 Bing 搜索 site:domain 游戏名
+            query = f'site:{domain} {name}'
+            search_url = f'https://www.bing.com/search?q={quote(query)}'
+            r = requests.get(search_url, headers=headers, timeout=15)
+            soup = BeautifulSoup(r.text, 'lxml')
+
+            # 2. 在搜索结果中找该站点的链接
+            result_links = soup.select('.b_algo h2 a, #b_results h2 a, .b_title a')
+            game_url = None
+            game_title = name
+            for a in result_links:
+                href = a.get('href', '')
+                text = a.get_text(strip=True)
+                if domain in href:
+                    game_url = href
+                    game_title = text.split('_')[0] if '_' in text else text
+                    break
+
+            if not game_url:
+                return {}
+
+            # 3. 访问游戏详情页
+            r2 = requests.get(game_url, headers=headers, timeout=15)
+            soup2 = BeautifulSoup(r2.content, 'lxml')
+
+            # 4. 提取标签（优先从游戏信息区提取，排除侧边栏攻略链接）
+            tags = []
+            # 先找游戏信息/属性区域
+            info_area = soup2.select_one('.game-info, .game-attr, .info-box, .game-meta, .g-info, .detail-info')
+            if info_area:
+                tag_elems = info_area.select('a, span.tag, span.type, .label')
+                for t in tag_elems[:10]:
+                    tag_text = t.get_text(strip=True)
+                    if tag_text and len(tag_text) >= 2 and len(tag_text) <= 10:
+                        tags.append(tag_text)
+
+            # 如果没有找到信息区，尝试通用标签选择器（排除太长的文本即攻略链接）
+            if not tags:
+                exclude_words = ['补丁', '修改器', '攻略', '存档', 'MOD', 'mod', '汉化', '下载', '全DLC']
+                tag_elems = (soup2.select('.tag a, .type a, .info-tag a')
+                             or soup2.select('[class*="tag"] a, [class*="type"] a'))
+                for t in tag_elems[:8]:
+                    tag_text = t.get_text(strip=True)
+                    if (tag_text and len(tag_text) >= 2 and len(tag_text) <= 8
+                            and not any(w in tag_text for w in exclude_words)):
+                        tags.append(tag_text)
+
+            # 5. 提取简介
+            intro = ''
+            intro_elem = (
+                soup2.select_one('.game-desc, .game-intro, .game-des, .intro, .g-intro')
+                or soup2.select_one('[class*="desc"], [class*="intro"], [class*="summary"]')
+            )
+            if intro_elem:
+                intro = intro_elem.get_text(strip=True)[:500]
+
+            # 6. 提取发布日期
+            release_date = None
+            date_elems = soup2.select('[class*="date"], [class*="time"], .game-date, .release')
+            for de in date_elems:
+                date_text = de.get_text(strip=True)
+                match = re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})', date_text)
+                if match:
+                    release_date = f'{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}'
+                    break
+
+            # 7. 提取封面图
+            cover_url = ''
+            cover_img = (
+                soup2.select_one('.game-cover img, .game-img img, .detail-img img, .pic img')
+                or soup2.select_one('[class*="cover"] img, [class*="thumb"] img, [class*="pic"] img')
+                or soup2.select_one('img[src*="cover"], img[src*="thumb"], img[src*="game"]')
+            )
+            if cover_img:
+                src = cover_img.get('src') or cover_img.get('data-src') or ''
+                if src:
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        # Resolve relative to domain
+                        base = re.match(r'(https?://[^/]+)', game_url)
+                        if base:
+                            src = base.group(1) + src
+                    cover_url = src
+
+            return {
+                'title': game_title,
+                'tags': tags,
+                'intro': intro,
+                'cover_image_url': cover_url,
+                'release_date': release_date,
+                'purchase_link': game_url,
+            }
+        except Exception:
+            return {}
+
+    def merge_data(self, search_name, steam, douban, youxia=None, doyo=None, threedm=None):
+        """合并所有来源的数据，豆瓣中文信息优先"""
+        youxia = youxia or {}
+        doyo = doyo or {}
+        threedm = threedm or {}
+
+        title = douban.get('douban_title') or youxia.get('title') or steam.get('title', search_name)
         rating = douban.get('douban_rating') or 0
-        tags = list(dict.fromkeys(douban.get('tags', []) + steam.get('tags', [])))
-        # 简介：豆瓣优先，Steam 补充
-        intro = douban.get('douban_intro', '') or steam.get('official_intro', '')
+        tags = list(dict.fromkeys(
+            douban.get('tags', []) +
+            steam.get('tags', []) +
+            youxia.get('tags', []) +
+            doyo.get('tags', []) +
+            threedm.get('tags', [])
+        ))
+        # 简介：豆瓣优先，Steam 补充，游侠补充
+        intro = (douban.get('douban_intro', '')
+                 or steam.get('official_intro', '')
+                 or youxia.get('intro', ''))
+
+        # 封面：Steam 优先，游侠补充
+        cover = steam.get('cover_image_url', '') or youxia.get('cover_image_url', '')
+
+        # 购买链接
+        purchase = steam.get('purchase_link', '') or youxia.get('purchase_link', '')
 
         return {
             'title': title,
             'rating': float(rating) if rating else 0,
             'official_intro': intro,
-            'cover_image_url': steam.get('cover_image_url', ''),
-            'purchase_link': steam.get('purchase_link', ''),
-            'release_date': steam.get('release_date'),
+            'cover_image_url': cover,
+            'purchase_link': purchase,
+            'release_date': steam.get('release_date') or youxia.get('release_date'),
             'tags': tags,
         }
 
