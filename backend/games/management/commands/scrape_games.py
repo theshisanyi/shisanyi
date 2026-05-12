@@ -48,9 +48,9 @@ class Command(BaseCommand):
 
     def scrape_steam(self, name):
         """通过 Steam Storefront API 搜索游戏"""
-        # Search
-        search_url = f'https://store.steampowered.com/api/storesearch?term={quote(name)}&l=schinese'
-        resp = requests.get(search_url, timeout=15)
+        # Search (need cc=CN for Chinese region results)
+        search_url = f'https://store.steampowered.com/api/storesearch?term={quote(name)}&l=schinese&cc=CN'
+        resp = requests.get(search_url, timeout=30)
         resp.raise_for_status()
         items = resp.json().get('items', [])
         if not items:
@@ -92,7 +92,7 @@ class Command(BaseCommand):
         }
 
     def scrape_douban(self, name):
-        """从豆瓣搜索游戏"""
+        """从豆瓣搜索游戏，获取标题和评分"""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -105,22 +105,36 @@ class Command(BaseCommand):
         if not result:
             return {}
 
+        # Get title
         title_elem = result.select_one('.title a')
         title = title_elem.text.strip() if title_elem else name
 
-        rating_elem = result.select_one('.rating_nums')
+        # Get rating
         rating = 0
+        rating_elem = soup.select_one('.rating_nums')
+        if not rating_elem:
+            rating_elem = result.select_one('.rating_nums')
         if rating_elem:
             try:
                 rating = float(rating_elem.text.strip())
             except ValueError:
                 rating = 0
 
-        subject_elem = result.select_one('.subject-cast')
+        # Get tags from result content (Douban search results have limited structured tag data)
         tags = []
-        if subject_elem:
-            texts = subject_elem.text.replace('\n', ' ').replace('\xa0', ' ')
-            tags = [t.strip() for t in re.split(r'[/\s]+', texts) if t.strip()][:5]
+        content_elem = result.select_one('.content p') or result.select_one('.content')
+        if content_elem:
+            text = content_elem.get_text(' ', strip=True)
+            # Split into potential tag fragments
+            parts = [p.strip() for p in re.split(r'[，,、/\s]+', text) if len(p.strip()) >= 2]
+            # Exclude non-tag patterns
+            exclude_patterns = ['人关注', '人评价', '人玩过', '人在玩', '人想玩', '人在做',
+                               '上海', '北京', '深圳', '广州', '杭州', '成都', '豆瓣']
+            tags = [p for p in parts
+                    if not any(ep in p for ep in exclude_patterns)
+                    and not re.match(r'^\d+$', p)
+                    and p != title
+                    and p != name][:6]
 
         return {
             'douban_title': title,
@@ -131,13 +145,15 @@ class Command(BaseCommand):
     def merge_data(self, search_name, steam, douban):
         """合并 Steam 和豆瓣数据，豆瓣中文信息优先"""
         title = douban.get('douban_title') or steam.get('title', search_name)
-        rating = douban.get('douban_rating') or steam.get('rating', 0)
+        rating = douban.get('douban_rating') or 0
         tags = list(dict.fromkeys(douban.get('tags', []) + steam.get('tags', [])))
+        # 简介：豆瓣优先，Steam 补充
+        intro = douban.get('douban_intro', '') or steam.get('official_intro', '')
 
         return {
             'title': title,
             'rating': float(rating) if rating else 0,
-            'official_intro': steam.get('official_intro', ''),
+            'official_intro': intro,
             'cover_image_url': steam.get('cover_image_url', ''),
             'purchase_link': steam.get('purchase_link', ''),
             'release_date': steam.get('release_date'),
