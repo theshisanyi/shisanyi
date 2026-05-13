@@ -1,7 +1,7 @@
 <template>
   <div class="game-detail-page" v-if="game">
     <!-- Blurred background -->
-    <div class="blur-bg" v-if="game.cover_image" :style="{ backgroundImage: `url(${game.cover_image})` }"></div>
+    <img v-if="game.cover_image" :src="game.cover_image" class="blur-bg" />
     <div class="blur-overlay"></div>
 
     <!-- Back button -->
@@ -71,16 +71,18 @@ onMounted(() => {
 .blur-bg {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-size: cover;
-  background-position: center;
-  filter: blur(30px) brightness(0.3);
-  transform: scale(1.1);
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  filter: blur(20px);
+  opacity: 0.35;
+  transform: scale(1.05);
   z-index: -2;
 }
 .blur-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(13, 17, 23, 0.6);
+  background: rgba(13, 17, 23, 0.4);
   z-index: -1;
 }
 .back-btn {
